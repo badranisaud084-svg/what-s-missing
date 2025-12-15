@@ -2,7 +2,6 @@
 const STB_TO_FT3 = 5.615;
 const SECONDS_PER_DAY = 86400;
 const FRICTION_CONSTANT = 2.5e-6;
-const PI = 5.0; // Productivity Index
 const WATER_GRADIENT = 0.433; // psi/ft
 
 export interface SimulatorParams {
@@ -12,6 +11,8 @@ export interface SimulatorParams {
   tubingID: number; // inches
   productionRate: number; // STB/D
   depth?: number;
+  bubblePointPressure?: number; // psi
+  productivityIndex?: number; // STB/D/psi
 }
 
 export interface TraverseResult {
@@ -24,6 +25,124 @@ export interface TraverseResult {
   statusMessage: string;
   fluidSG: number;
 }
+
+export interface IPRData {
+  vogelCurve: { pwf: number; rate: number }[];
+  fetkovichCurve: { pwf: number; rate: number }[];
+  operatingPoint: { pwf: number; rate: number };
+  aofVogel: number; // Absolute Open Flow
+  aofFetkovich: number;
+  qmax: number;
+  reservoirPressure: number;
+}
+
+// ============ IPR CALCULATIONS ============
+
+/**
+ * Vogel's IPR Equation (1968)
+ * For solution-gas-drive reservoirs below bubble point
+ * q/qmax = 1 - 0.2*(Pwf/Pr) - 0.8*(Pwf/Pr)²
+ */
+export function calculateVogelIPR(
+  reservoirPressure: number,
+  productivityIndex: number,
+  bubblePointPressure: number,
+  nPoints: number = 50
+): { curve: { pwf: number; rate: number }[]; aof: number } {
+  const curve: { pwf: number; rate: number }[] = [];
+  
+  // Calculate qmax at Pwf = 0 (AOF - Absolute Open Flow)
+  // Using composite IPR if Pr > Pb
+  const pb = Math.min(bubblePointPressure, reservoirPressure);
+  
+  // Flow rate at bubble point
+  const qb = productivityIndex * (reservoirPressure - pb);
+  
+  // Maximum rate at Pwf = 0 using Vogel below bubble point
+  // qmax = qb + (J * Pb) / 1.8
+  const qmax = qb + (productivityIndex * pb) / 1.8;
+  
+  for (let i = 0; i <= nPoints; i++) {
+    const pwf = (reservoirPressure * i) / nPoints;
+    let rate: number;
+    
+    if (pwf >= pb) {
+      // Above bubble point - linear (undersaturated)
+      rate = productivityIndex * (reservoirPressure - pwf);
+    } else {
+      // Below bubble point - Vogel equation
+      const vogelPart = 1 - 0.2 * (pwf / pb) - 0.8 * Math.pow(pwf / pb, 2);
+      rate = qb + ((productivityIndex * pb) / 1.8) * vogelPart;
+    }
+    
+    curve.push({ pwf, rate: Math.max(0, rate) });
+  }
+  
+  return { curve, aof: qmax };
+}
+
+/**
+ * Fetkovich's IPR Equation (1973)
+ * Empirical correlation for gas and high GOR wells
+ * q = C * (Pr² - Pwf²)^n
+ * where n typically ranges from 0.5 to 1.0
+ */
+export function calculateFetkovichIPR(
+  reservoirPressure: number,
+  productivityIndex: number,
+  n: number = 0.8, // Flow exponent (0.5-1.0)
+  nPoints: number = 50
+): { curve: { pwf: number; rate: number }[]; aof: number } {
+  const curve: { pwf: number; rate: number }[] = [];
+  
+  // Calculate C from PI at reservoir conditions
+  // At small drawdown: q ≈ J * (Pr - Pwf) ≈ C * 2 * Pr * (Pr - Pwf)^n
+  // So C ≈ J / (2 * Pr * (Pr)^(n-1))
+  const C = productivityIndex / (2 * reservoirPressure * Math.pow(reservoirPressure, n - 1));
+  
+  // AOF at Pwf = 0
+  const aof = C * Math.pow(reservoirPressure * reservoirPressure, n);
+  
+  for (let i = 0; i <= nPoints; i++) {
+    const pwf = (reservoirPressure * i) / nPoints;
+    const deltaP2 = Math.pow(reservoirPressure, 2) - Math.pow(pwf, 2);
+    const rate = C * Math.pow(Math.max(0, deltaP2), n);
+    
+    curve.push({ pwf, rate: Math.max(0, rate) });
+  }
+  
+  return { curve, aof };
+}
+
+/**
+ * Calculate complete IPR data
+ */
+export function calculateIPR(params: SimulatorParams): IPRData {
+  const {
+    reservoirPressure,
+    productivityIndex = 5.0,
+    bubblePointPressure = reservoirPressure * 0.7,
+    productionRate,
+  } = params;
+  
+  const vogel = calculateVogelIPR(reservoirPressure, productivityIndex, bubblePointPressure);
+  const fetkovich = calculateFetkovichIPR(reservoirPressure, productivityIndex);
+  
+  // Calculate operating point Pwf from production rate
+  const pwf = reservoirPressure - productionRate / productivityIndex;
+  
+  return {
+    vogelCurve: vogel.curve,
+    fetkovichCurve: fetkovich.curve,
+    operatingPoint: { pwf: Math.max(0, pwf), rate: productionRate },
+    aofVogel: vogel.aof,
+    aofFetkovich: fetkovich.aof,
+    qmax: Math.max(vogel.aof, fetkovich.aof),
+    reservoirPressure,
+  };
+}
+
+// ============ ORIGINAL FUNCTIONS ============
 
 export function apiToSpecificGravity(api: number): number {
   return 141.5 / (131.5 + api);
@@ -56,6 +175,7 @@ export function calculateTraverse(params: SimulatorParams): TraverseResult {
     tubingID: tid,
     productionRate: rate,
     depth = 8000,
+    productivityIndex = 5.0,
   } = params;
 
   const nPoints = 100;
@@ -69,8 +189,8 @@ export function calculateTraverse(params: SimulatorParams): TraverseResult {
     depthArray.push(depth - (i * depth) / (nPoints - 1));
   }
 
-  // Bottom-hole conditions
-  const pwf = pRes - rate / PI;
+  // Bottom-hole conditions using PI
+  const pwf = pRes - rate / productivityIndex;
   pressureArray[0] = pwf;
 
   // Friction gradient

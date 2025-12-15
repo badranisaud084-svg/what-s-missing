@@ -24,35 +24,57 @@ export function ControlSlider({
   color,
   onChange,
 }: ControlSliderProps) {
+  const percentage = ((value - min) / (max - min)) * 100;
+
   return (
     <div className="space-y-2">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-start">
         <div className="flex flex-col">
-          <span className="text-sm font-medium text-foreground/80">{labelAr}</span>
-          <span className="text-xs text-muted-foreground">{label}</span>
+          <span className="text-xs font-medium text-foreground/90">{labelAr}</span>
+          <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider">{label}</span>
         </div>
-        <span
+        <div
           className={cn(
-            "font-display text-lg font-bold px-3 py-1 rounded-md",
+            "font-mono text-sm font-bold px-2 py-0.5 rounded",
             "bg-muted/50 border border-border/50"
           )}
-          style={{ color }}
+          style={{ color, textShadow: `0 0 10px ${color}40` }}
         >
-          {value.toLocaleString()} {unit}
-        </span>
+          {value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          <span className="text-[10px] text-muted-foreground ml-1">{unit}</span>
+        </div>
       </div>
-      <Slider
-        value={[value]}
-        min={min}
-        max={max}
-        step={step}
-        onValueChange={([v]) => onChange(v)}
-        className="cursor-pointer"
-        style={{
-          // @ts-ignore
-          '--slider-color': color,
-        }}
-      />
+      
+      {/* Progress bar background */}
+      <div className="relative">
+        <div className="absolute inset-0 h-2 bg-muted/30 rounded-full overflow-hidden">
+          <div 
+            className="h-full transition-all duration-150"
+            style={{ 
+              width: `${percentage}%`,
+              background: `linear-gradient(90deg, ${color}40, ${color}80)`,
+            }}
+          />
+        </div>
+        <Slider
+          value={[value]}
+          min={min}
+          max={max}
+          step={step}
+          onValueChange={([v]) => onChange(v)}
+          className="cursor-pointer relative z-10"
+          style={{
+            // @ts-ignore
+            '--slider-color': color,
+          }}
+        />
+      </div>
+
+      {/* Min/Max labels */}
+      <div className="flex justify-between text-[9px] text-muted-foreground/60 font-mono">
+        <span>{min}</span>
+        <span>{max}</span>
+      </div>
     </div>
   );
 }
